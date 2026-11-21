@@ -54,7 +54,7 @@ const server = http.createServer((req, res) => {
   res.end('mini-pubg-server ok');
 });
 
-const wss = new WebSocketServer({ server, maxPayload: 2048 });
+const wss = new WebSocketServer({ server, maxPayload: 16384 });
 
 wss.on('connection', ws => {
   ws.id = nextId++;
@@ -64,7 +64,7 @@ wss.on('connection', ws => {
   ws.on('pong', () => { ws.alive = true; });
 
   ws.on('message', raw => {
-    if (++ws.hits > 30) return;                   // chống spam (30 tin / giây)
+    if (++ws.hits > 120) return;                  // chống spam (120 tin / giây, voice cần gửi nhiều tin ICE)
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (!msg || typeof msg.t !== 'string') return;
@@ -93,6 +93,11 @@ wss.on('connection', ws => {
       case 'profile': {
         const m = ws.room && ws.room.members.get(ws.id);
         if (m) { m.name = cleanName(msg.name); if (msg.look !== undefined) m.look = cleanLook(msg.look); broadcast(ws.room); }
+        break;
+      }
+      case 'sig': {                                   // chuyển tin báo hiệu voice (WebRTC) tới đúng 1 người cùng phòng
+        const target = ws.room && ws.room.members.get(Number(msg.to));
+        if (target && msg.data && typeof msg.data === 'object') send(target.ws, { t: 'sig', from: ws.id, data: msg.data });
         break;
       }
       case 'leave': leave(ws); send(ws, { t: 'left' }); break;

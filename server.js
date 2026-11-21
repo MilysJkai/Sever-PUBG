@@ -1,14 +1,18 @@
 // Server tổ đội cho Mini PUBG 3D. Chạy:  npm install  rồi  npm start   (mặc định cổng 8787)
-// Chỉ làm 1 việc: tạo phòng theo mã, báo danh sách thành viên cho mọi người trong phòng.
+// Tạo phòng (tổ đội) theo mã, báo danh sách thành viên, chuyển tin voice và chat trong tổ đội.
+// Giới hạn người là theo TỪNG tổ đội (đội đôi / 4 / 5), không giới hạn cả server.
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT) || 8787;
-const MAX_MEMBERS = 4;
+const SQUAD_SIZES = [2, 4, 5];                    // kích thước tổ đội theo chế độ ĐÔI / 4 / 5 (khớp SQUAD_SIZES ở client)
+const DEFAULT_SQUAD = 4;
+const CHAT_MAX_LEN = 120;
+const CHAT_COOLDOWN_MS = 300;
 const LOOKS = 6;                                  // số bộ màu nhân vật (khớp LOOKS ở client)
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // bỏ O/0/I/1 cho dễ đọc
 
-const rooms = new Map();                          // code -> { code, hostId, members: Map(id -> member) }
+const rooms = new Map();                          // code -> { code, hostId, max, members: Map(id -> member) }
 let nextId = 1;
 
 const send = (ws, o) => { if (ws.readyState === 1) ws.send(JSON.stringify(o)); };
@@ -25,11 +29,12 @@ function cleanName(s) {
   s = String(s ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 16);
   return s || 'PLAYER';
 }
+const cleanMax = n => (SQUAD_SIZES.includes(Number(n)) ? Number(n) : DEFAULT_SQUAD);
 const cleanLook = n => { n = Number(n); return Number.isInteger(n) && n >= 0 && n < LOOKS ? n : 0; };
 
 function broadcast(room) {
   const members = [...room.members.values()].map(m => ({ id: m.id, name: m.name, look: m.look }));
-  for (const m of room.members.values()) send(m.ws, { t: 'party', code: room.code, selfId: m.id, hostId: room.hostId, members });
+  for (const m of room.members.values()) send(m.ws, { t: 'party', code: room.code, selfId: m.id, hostId: room.hostId, max: room.max, members });
 }
 
 function leave(ws) {
@@ -73,7 +78,7 @@ wss.on('connection', ws => {
       case 'ping': send(ws, { t: 'pong' }); break;
       case 'create': {
         leave(ws);
-        const room = { code: genCode(), hostId: null, members: new Map() };
+        const room = { code: genCode(), hostId: null, max: cleanMax(msg.max), members: new Map() };
         rooms.set(room.code, room);
         enter(ws, room, msg);
         break;
@@ -82,11 +87,11 @@ wss.on('connection', ws => {
         const code = String(msg.code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
         let room = rooms.get(code);
         if (!room && msg.rejoin && code.length === 5) {   // server vừa khởi động lại: dựng lại phòng cũ
-          room = { code, hostId: null, members: new Map() };
+          room = { code, hostId: null, max: cleanMax(msg.max), members: new Map() };
           rooms.set(code, room);
         }
         if (!room) { send(ws, { t: 'error', msg: 'Mã tổ đội không tồn tại' }); break; }
-        if (room.members.size >= MAX_MEMBERS && !room.members.has(ws.id)) { send(ws, { t: 'error', msg: 'Tổ đội đã đầy (tối đa ' + MAX_MEMBERS + ')' }); break; }
+        if (room.members.size >= room.max && !room.members.has(ws.id)) { send(ws, { t: 'error', msg: 'Tổ đội đã đầy (tối đa ' + room.max + ')' }); break; }
         if (ws.room !== room) { leave(ws); enter(ws, room, msg); }
         break;
       }
@@ -98,6 +103,17 @@ wss.on('connection', ws => {
       case 'sig': {                                   // chuyển tin báo hiệu voice (WebRTC) tới đúng 1 người cùng phòng
         const target = ws.room && ws.room.members.get(Number(msg.to));
         if (target && msg.data && typeof msg.data === 'object') send(target.ws, { t: 'sig', from: ws.id, data: msg.data });
+        break;
+      }
+      case 'chat': {                                  // chat chỉ trong tổ đội: phát cho mọi thành viên, kể cả người gửi
+        const me = ws.room && ws.room.members.get(ws.id);
+        if (!me) break;
+        const text = String(msg.text ?? '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, CHAT_MAX_LEN);
+        if (!text) break;
+        const now = Date.now();
+        if (now - (ws.lastChat || 0) < CHAT_COOLDOWN_MS) break;
+        ws.lastChat = now;
+        for (const m of ws.room.members.values()) send(m.ws, { t: 'chat', id: me.id, name: me.name, text });
         break;
       }
       case 'leave': leave(ws); send(ws, { t: 'left' }); break;

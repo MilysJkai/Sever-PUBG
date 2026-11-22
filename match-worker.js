@@ -13,7 +13,7 @@ import { takeLoot } from './src/items/loot.js';
 import { kill } from './src/combat/combat.js';
 
 const DT = 1 / 20, MS = 50;
-const MAX_LAG = 8;                 // bù trễ tối đa 8 tick = 400 ms
+const MAX_LAG = 12;                 // bù trễ tối đa 8 tick = 400 ms
 const GRACE_S = workerData.graceS ?? 60;       // rớt mạng quá lâu thì coi như bỏ trận
 const OVER_LINGER_S = workerData.overLingerS ?? 20;
 const { seed, bots, players, countdown } = workerData;

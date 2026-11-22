@@ -1,9 +1,9 @@
 {
   "name": "mini-pubg-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Server tổ đội cho Mini PUBG 3D (WebSocket)",
+  "description": "Server tổ đội + trận đấu cho Mini PUBG 3D (WebSocket)",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
   "engines": { "node": ">=18" },

@@ -1,8 +1,10 @@
-// Server tổ đội cho Mini PUBG 3D. Chạy:  npm install  rồi  npm start   (mặc định cổng 8787)
-// Tạo phòng (tổ đội) theo mã, báo danh sách thành viên, chuyển tin voice và chat trong tổ đội.
-// Giới hạn người là theo TỪNG tổ đội (đội đôi / 4 / 5), không giới hạn cả server.
+// Server Mini PUBG 3D (WebSocket). Chạy:  npm install  rồi  npm start   (mặc định cổng 8787)
+//  - Tổ đội: tạo phòng theo mã, danh sách thành viên, chat và chuyển tin voice (WebRTC) trong tổ đội.
+//  - Trận: ghép tổ đội cùng chế độ vào hàng đợi, điền bot, chạy trận 20 tick/giây (matchmaker.js + match-worker.js).
+// Giới hạn người là theo TỪNG tổ đội (đôi / 4 / 5), không giới hạn cả server.
 import http from 'node:http';
 import { WebSocketServer } from 'ws';
+import * as mm from './matchmaker.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 const SQUAD_SIZES = [2, 4, 5];                    // kích thước tổ đội theo chế độ ĐÔI / 4 / 5 (khớp SQUAD_SIZES ở client)
@@ -11,6 +13,8 @@ const CHAT_MAX_LEN = 120;
 const CHAT_COOLDOWN_MS = 300;
 const LOOKS = 6;                                  // số bộ màu nhân vật (khớp LOOKS ở client)
 const ALPHA = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // bỏ O/0/I/1 cho dễ đọc
+const MAX_MSG_PER_SEC = 240;                      // phím + voice cần nhiều tin / giây
+const ALLOW_DEBUG = process.env.ALLOW_DEBUG === '1';
 
 const rooms = new Map();                          // code -> { code, hostId, max, members: Map(id -> member) }
 let nextId = 1;
@@ -38,6 +42,7 @@ function broadcast(room) {
 }
 
 function leave(ws) {
+  mm.cancel(ws);                                  // đang xếp hàng tìm trận thì huỷ cả tổ đội
   const room = ws.room;
   if (!room) return;
   room.members.delete(ws.id);
@@ -56,7 +61,7 @@ function enter(ws, room, msg) {
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-  res.end('mini-pubg-server ok');
+  res.end('mini-pubg-server ok ' + JSON.stringify(mm.stats()));
 });
 
 const wss = new WebSocketServer({ server, maxPayload: 16384 });
@@ -64,18 +69,20 @@ const wss = new WebSocketServer({ server, maxPayload: 16384 });
 wss.on('connection', ws => {
   ws.id = nextId++;
   ws.room = null;
+  ws.mm = null;                                   // { match, pid } khi đang trong trận
+  ws.ticket = null;                               // đang xếp hàng tìm trận
   ws.alive = true;
   ws.hits = 0;
   ws.on('pong', () => { ws.alive = true; });
 
   ws.on('message', raw => {
-    if (++ws.hits > 120) return;                  // chống spam (120 tin / giây, voice cần gửi nhiều tin ICE)
+    if (++ws.hits > MAX_MSG_PER_SEC) return;      // chống spam
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
     if (!msg || typeof msg.t !== 'string') return;
 
     switch (msg.t) {
-      case 'ping': send(ws, { t: 'pong' }); break;
+      case 'ping': send(ws, { t: 'pong', ts: msg.ts }); break;
       case 'create': {
         leave(ws);
         const room = { code: genCode(), hostId: null, max: cleanMax(msg.max), members: new Map() };
@@ -117,10 +124,40 @@ wss.on('connection', ws => {
         break;
       }
       case 'leave': leave(ws); send(ws, { t: 'left' }); break;
+
+      // ---------------- tìm trận
+      case 'find': {                                  // chủ tổ đội (hoặc người chơi solo) bấm CHƠI
+        if (ws.mm) { send(ws, { t: 'error', msg: 'Bạn đang trong trận' }); break; }
+        let socks, size;
+        if (ws.room) {
+          if (ws.room.hostId !== ws.id) { send(ws, { t: 'error', msg: 'Chỉ chủ tổ đội mới bắt đầu tìm trận' }); break; }
+          socks = [];
+          for (const m of ws.room.members.values()) { m.ws.name = m.name; m.ws.look = m.look; socks.push(m.ws); }
+          size = ws.room.max;
+        } else {
+          ws.name = cleanName(msg.name); ws.look = cleanLook(msg.look);
+          socks = [ws]; size = 1;
+        }
+        const err = mm.enqueue(socks, size);
+        if (err) send(ws, { t: 'error', msg: err });
+        break;
+      }
+      case 'cancel': {                                // huỷ tìm trận (chỉ chủ tổ đội, hoặc solo)
+        if (ws.room && ws.room.hostId !== ws.id) break;
+        if (ws.ticket) mm.cancel(ws);
+        break;
+      }
+
+      // ---------------- trong trận
+      case 'in':
+      case 'act':
+      case 'dbg': mm.forward(ws, msg, ALLOW_DEBUG); break;
+      case 'resume': mm.resume(ws, msg.token); break;
+      case 'leavematch': mm.leaveMatch(ws); break;
     }
   });
 
-  ws.on('close', () => leave(ws));
+  ws.on('close', () => { mm.onClose(ws); leave(ws); });
   ws.on('error', () => {});
 });
 

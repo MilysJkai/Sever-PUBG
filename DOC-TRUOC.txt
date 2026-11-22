@@ -1,0 +1,2 @@
+DAN VAO: C:\Users\Lim\Desktop\mini-pubg-server\
+Sau do double-click CHAY-VA-SERVER.bat, roi commit + deploy len Render.
